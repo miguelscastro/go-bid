@@ -71,17 +71,17 @@ func (r *AuctionRoom) broadcastMessage(m Message) {
 		if err != nil {
 			if errors.Is(err, ErrBidIsToLow) {
 				if client, ok := r.Clients[m.UserId]; ok {
-					client.Send <- Message{Kind: FailedToPlaceBid, Message: ErrBidIsToLow.Error()}
+					client.Send <- Message{Kind: FailedToPlaceBid, Message: ErrBidIsToLow.Error(), UserId: m.UserId}
 				}
 				return
 			}
 		}
 		if client, ok := r.Clients[m.UserId]; ok {
-			client.Send <- Message{Kind: SuccesfullyPlacedBid, Message: "Your bid was succesfully placed"}
+			client.Send <- Message{Kind: SuccesfullyPlacedBid, Message: "Your bid was succesfully placed", UserId: m.UserId}
 		}
 
 		for id, client := range r.Clients {
-			newBidMessage := Message{Kind: NewBidPlaced, Message: "A new bid was placed", Amount: bid.BidAmount}
+			newBidMessage := Message{Kind: NewBidPlaced, Message: "A new bid was placed", Amount: bid.BidAmount, UserId: m.UserId}
 			if id == m.UserId {
 				continue
 			}
@@ -155,6 +155,8 @@ func NewClient(room *AuctionRoom, conn *websocket.Conn, userId uuid.UUID) *Clien
 const (
 	maxMessageSize = 512
 	readDeadline   = 60 * time.Second
+	writeWait      = 10 * time.Second
+	pingPeriod     = (readDeadline * 9) / 10
 )
 
 func (c *Client) ReadEventLoop() {
@@ -165,7 +167,7 @@ func (c *Client) ReadEventLoop() {
 
 	c.Conn.SetReadLimit(maxMessageSize)                  // define o tamanho da mensagem em bytes
 	c.Conn.SetReadDeadline(time.Now().Add(readDeadline)) // define o tempo que a mensagem é valida dentro do chat
-	c.Conn.SetPongHandler(func(string) error {
+	c.Conn.SetPongHandler(func(string) error {           // aguarda a resposta do client confirmando a conexão, considerando morta no deadline.
 		c.Conn.SetReadDeadline(time.Now().Add(readDeadline))
 		return nil
 	})
@@ -187,8 +189,47 @@ func (c *Client) ReadEventLoop() {
 				Message: "this message should be a valid json",
 				UserId:  m.UserId,
 			}
+			continue
 		}
 
 		c.Room.Broadcast <- m
+	}
+}
+
+func (c *Client) WriteEventLoop() {
+	ticker := time.NewTicker(pingPeriod)
+	defer func() {
+		ticker.Stop()
+		c.Conn.Close()
+	}()
+
+	for {
+		select {
+		case message, ok := <-c.Send:
+			if !ok {
+				c.Conn.WriteJSON(Message{
+					Kind:    websocket.CloseMessage,
+					Message: "closing websocket connection",
+				})
+				return
+			}
+
+			if message.Kind == AuctionFinished {
+				close(c.Send)
+				return
+			}
+			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
+			err := c.Conn.WriteJSON(message)
+			if err != nil {
+				c.Room.Unregister <- c
+				return
+			}
+		case <-ticker.C:
+			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := c.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				slog.Error("unexpected write error", "error", err)
+				return
+			}
+		}
 	}
 }
