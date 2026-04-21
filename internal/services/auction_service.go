@@ -87,6 +87,7 @@ func (r *AuctionRoom) broadcastMessage(m Message) {
 }
 
 func (r *AuctionRoom) Run() {
+	slog.Info("auction has begun", "auctionId", r.Id)
 	defer func() {
 		close(r.Broadcast)
 		close(r.Register)
@@ -116,6 +117,7 @@ func NewAuctionRoom(ctx context.Context, id uuid.UUID, BidsService BidsService) 
 		Broadcast:   make(chan Message),
 		Register:    make(chan *Client),
 		Unregister:  make(chan *Client),
+		Clients:     make(map[uuid.UUID]*Client),
 		Context:     ctx,
 		BidsService: BidsService,
 	}
